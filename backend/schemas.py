@@ -9,3 +9,10 @@ class RegisterRequest(BaseModel):
     email: str 
     password: str 
     linkedin_slug: str 
+
+class ConnectionsRequest(BaseModel):
+    linkedin_slug: str 
+
+class UserPublic(BaseModel):
+    full_name: str 
+    linkedin_slug: str 
