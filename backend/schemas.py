@@ -11,6 +11,7 @@ class RegisterRequest(BaseModel):
     linkedin_slug: str 
 
 class ConnectionsRequest(BaseModel):
+    full_name: str
     linkedin_slug: str 
 
 class UserPublic(BaseModel):

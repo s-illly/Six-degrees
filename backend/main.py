@@ -6,6 +6,7 @@ from passlib.context import CryptContext
 from auth import create_access_token, get_current_user
 from schemas import LoginRequest, RegisterRequest, ConnectionsRequest
 from sqlalchemy import or_
+from collections import defaultdict, deque 
 
 app = FastAPI()
 
@@ -105,3 +106,57 @@ def get_connections(current_user: User = Depends(get_current_user), db: Session 
         for u in users
     ]
 
+
+@app.get("/search")
+def degree(linkedin_slug: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    target_slug = linkedin_slug.strip().lower()
+    target_user = db.query(User).filter(User.linkedin_slug == target_slug).first()
+    if not(target_user):
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    edges = db.query(Connection).all()
+    adj = defaultdict(list)
+
+    for e in edges:
+        adj[e.user_id_1].append(e.user_id_2)
+        adj[e.user_id_2].append(e.user_id_1)
+
+    start = current_user.id 
+    goal = target_user.id 
+
+    queue = deque([start])
+    visited = set([start])
+    prev = {start: None}
+
+    while queue:
+        node = queue.popleft()
+
+        if node == goal:
+            break
+        for nei in adj.get(node, []):
+            if nei not in visited:
+                visited.add(nei)
+                prev[nei] = node 
+                queue.append(nei)
+    
+    if goal not in prev: 
+        return {"degrees": None, "path": []}    
+    path_ids = []
+    cur = goal
+    while cur is not None:
+        path_ids.append(cur)
+        cur = prev[cur]
+    path_ids.reverse()
+    degrees = len(path_ids) - 1
+
+    users = db.query(User).filter(User.id.in_(path_ids)).all()
+    by_id = {u.id: u for u in users}
+
+    path = [
+        {
+            "full_name": by_id[uid].full_name,
+            "linkedin_slug": by_id[uid].linkedin_slug,
+        }
+        for uid in path_ids
+    ]
+    return {"degrees": degrees, "path": path}
