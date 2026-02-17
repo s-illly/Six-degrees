@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException
 from database import engine, get_db
-from models import Base, User, Connection 
+from models import Base, User, Connection, GhostProfile, GhostEdge
 from sqlalchemy.orm import Session
 from passlib.context import CryptContext
 from auth import create_access_token, get_current_user
@@ -19,6 +19,7 @@ def root():
 
 @app.post("/register")
 def register(request: RegisterRequest, db: Session = Depends(get_db)):
+    slug = request.linkedin_slug.strip().lower()
     
     existing_user = db.query(User).filter(User.email == request.email).first()
     if existing_user:
@@ -30,12 +31,30 @@ def register(request: RegisterRequest, db: Session = Depends(get_db)):
         full_name= request.full_name,
         email= request.email,
         password_hash= hashed_password,
-        linkedin_slug= request.linkedin_slug.lower()
+        linkedin_slug= slug 
     )
 
     db.add(user)
     db.commit()
     db.refresh(user)
+
+    # Create user from ghost profile 
+    existing_ghost = db.query(GhostProfile).filter(GhostProfile.linkedin_slug == slug).first()
+    if existing_ghost:
+        pending_edges = db.query(GhostEdge).filter(GhostEdge.ghost_id == existing_ghost.id).all()
+
+        for pe in pending_edges:
+            a = min(pe.src_user_id, user.id)
+            b = max(pe.src_user_id, user.id)
+
+            exists = db.query(Connection).filter(Connection.user_id_1 == a, Connection.user_id_2 == b).first()
+            if not(exists):
+                db.add(Connection(user_id_1 = a, user_id_2 = b))
+        
+        for pe in pending_edges:
+            db.delete(pe)
+        db.delete(existing_ghost)
+        db.commit()
 
     return {"message": "User created successfully"}
 
@@ -59,9 +78,30 @@ def me(current_user: User = Depends(get_current_user)):
 
 @app.post("/connections")
 def add_connections(request: ConnectionsRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    target_user = db.query(User).filter(User.linkedin_slug == request.linkedin_slug.lower()).first()
+    slug = request.linkedin_slug.strip().lower()
+    target_user = db.query(User).filter(User.linkedin_slug == slug).first()
+    
+    # target is unregistered -> ghost profile 
     if not(target_user):
-        raise HTTPException(status_code=404, detail="User not found")
+        ghost = db.query(GhostProfile).filter(GhostProfile.linkedin_slug == slug).first()
+        if not(ghost):
+            ghost = GhostProfile(linkedin_slug = slug)
+
+            db.add(ghost)
+            db.commit()
+            db.refresh(ghost)
+
+        existing_edge = (db.query(GhostEdge).filter(GhostEdge.src_user_id == current_user.id, GhostEdge.ghost_id == ghost.id).first())
+        if existing_edge:
+            return {"message": "Connection already exists"}
+
+        pending = GhostEdge(src_user_id = current_user.id, ghost_id = ghost.id)
+        db.add(pending)
+        db.commit()
+
+        return {"message": "Pending connection created", "to": slug}
+
+    # target exists -> create real connection 
     if (target_user.id == current_user.id):
         raise HTTPException(status_code=400, detail="Cannot connect with yourself")
     a = min(current_user.id, target_user.id)
@@ -70,10 +110,7 @@ def add_connections(request: ConnectionsRequest, current_user: User = Depends(ge
     if (db.query(Connection).filter(Connection.user_id_1 == a, Connection.user_id_2 == b).first()):
         return {"message": "Connection already exists"}
     
-    connection = Connection (
-        user_id_1 = a,
-        user_id_2 = b,
-    )
+    connection = Connection (user_id_1 = a, user_id_2 = b)
 
     db.add(connection)
     db.commit()
