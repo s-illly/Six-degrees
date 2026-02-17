@@ -42,6 +42,10 @@ async function request(path, { method = "GET", body } = {}) {
 
 export const api = {
     login: (email, password) => request("/login", { method: "POST", body: { email, password }}),
-    graph: () => request("/graph",)
+    graph: () => request("/graph"),
+    connectionsList: () => request("/connections"),
+    addConnection: ({ linkedin_slug, full_name = "" }) =>
+      request("/connections", { method: "POST", body: { linkedin_slug, full_name } }),
+    me: () => request("/me"),
 };
 

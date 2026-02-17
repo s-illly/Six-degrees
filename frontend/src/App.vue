@@ -35,19 +35,29 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="min-h-screen font-sans">
-    <header class="flex justify-between items-center px-4 py-3 border-b border-gray-200 bg-white" role="banner">
-      <div class="font-bold text-xl" aria-label="App Title">Six Degrees</div>
-      <button v-if="loggedIn" class="px-4 py-2 rounded border border-gray-300 bg-white hover:bg-gray-50 transition" @click="handleLogout" aria-label="Logout">Logout</button>
+  <div class="min-h-screen bg-gray-50 text-gray-900">
+    <header class="sticky top-0 z-10 border-b border-gray-200 bg-white" role="banner">
+      <div class="mx-auto flex max-w-6xl items-center justify-between px-4 py-3">
+        <div class="text-lg font-bold" aria-label="App Title">Six Degrees</div>
+        <button
+          v-if="loggedIn"
+          class="inline-flex items-center justify-center rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50"
+          @click="handleLogout"
+          aria-label="Logout"
+        >
+          Logout
+        </button>
+      </div>
     </header>
 
-    <main class="flex justify-center items-start p-6" role="main">
-      <div v-if="!loggedIn" class="max-w-md w-full border border-gray-200 rounded-xl p-6 bg-white shadow" aria-label="Login Form">
-        <h2 class="text-lg font-semibold mb-4">Login</h2>
+    <main class="mx-auto w-full max-w-6xl px-4 py-6" role="main">
+      <section v-if="!loggedIn" class="mx-auto w-full max-w-md rounded-2xl border border-gray-200 bg-white p-6 shadow-sm" aria-label="Login Form">
+        <h1 class="text-lg font-bold">Sign in</h1>
+        <p class="mt-1 text-sm text-gray-600">Use your account email and password.</p>
 
-        <form @submit.prevent="handleLogin" class="flex flex-col gap-4">
+        <form @submit.prevent="handleLogin" class="mt-5 space-y-4">
           <div>
-            <label for="email" class="block text-sm mb-1">Email</label>
+            <label for="email" class="block text-sm font-semibold text-gray-800">Email</label>
             <input
               id="email"
               v-model="email"
@@ -56,12 +66,12 @@ onMounted(() => {
               autocomplete="username"
               required
               aria-required="true"
-              class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-gray-900 focus:outline-none text-base"
+              class="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-100"
             />
           </div>
 
           <div>
-            <label for="password" class="block text-sm mb-1">Password</label>
+            <label for="password" class="block text-sm font-semibold text-gray-800">Password</label>
             <input
               id="password"
               v-model="password"
@@ -70,18 +80,22 @@ onMounted(() => {
               autocomplete="current-password"
               required
               aria-required="true"
-              class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-gray-900 focus:outline-none text-base"
+              class="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-100"
             />
           </div>
 
-          <button class="mt-2 px-4 py-2 rounded-lg border border-gray-900 bg-gray-900 text-white font-medium transition hover:bg-gray-700 disabled:opacity-60 disabled:cursor-not-allowed" type="submit" :disabled="loading">
-            <span v-if="loading">Signing in...</span>
+          <button
+            class="inline-flex w-full items-center justify-center rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+            type="submit"
+            :disabled="loading"
+          >
+            <span v-if="loading">Signing in…</span>
             <span v-else>Sign in</span>
           </button>
         </form>
 
-        <p v-if="error" class="text-red-600 mt-3" role="alert">{{ error }}</p>
-      </div>
+        <p v-if="error" class="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800" role="alert">{{ error }}</p>
+      </section>
 
       <GraphView v-else />
     </main>
