@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from "vue";
 import * as d3 from "d3";
 import { api } from "../api";
+import { track } from "@vercel/analytics";
 
 const host = ref(null);
 const status = ref("Loading your network…");
@@ -474,6 +475,7 @@ async function handleRemovePending(ghostId) {
 }
 
 onMounted(async () => {
+  track("view_graph");
   status.value = "";
   await Promise.all([loadMe(), loadConnections(), loadPendingConnections(), loadUsers(), loadGraph()]);
 });
