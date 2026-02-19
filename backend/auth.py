@@ -10,6 +10,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from database import get_db
 from models import User
+from linkedin_utils import normalize_linkedin_slug, migrate_ghost_edges_to_user
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 load_dotenv()
@@ -66,12 +67,43 @@ async def login(code: str, state: str, request: Request, db: Session = Depends(g
     linkedin_sub = ui.get("sub")
     name = ui.get("name") or ui.get("given_name")
 
+    # Best-effort: LinkedIn OIDC userinfo sometimes includes a usable public identifier.
+    # We accept either a raw slug or a full URL and normalize it.
+    slug_candidate = (
+        ui.get("preferred_username")
+        or ui.get("vanityName")
+        or ui.get("publicProfileUrl")
+        or ui.get("profile")
+        or ui.get("profile_url")
+    )
+    inferred_slug = normalize_linkedin_slug(slug_candidate) if slug_candidate else ""
+
     if not linkedin_sub:
         raise HTTPException(status_code=400, detail="No linkedin subject returned")
     
     user = db.query(User).filter(User.linkedin_sub == linkedin_sub).first()
     if not user:
         user = User(full_name=name or "New User", linkedin_sub=linkedin_sub)
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+    # If we can infer a slug on login, attach it. Then (or if the user already has a slug),
+    # migrate any matching ghost nodes into real connections.
+    changed = False
+    if inferred_slug and not user.linkedin_slug:
+        existing_owner = db.query(User).filter(User.linkedin_slug == inferred_slug, User.id != user.id).first()
+        if not existing_owner:
+            user.linkedin_slug = inferred_slug
+            changed = True
+
+    migrated = 0
+    if user.linkedin_slug:
+        migrated = migrate_ghost_edges_to_user(db, user, user.linkedin_slug)
+        if migrated:
+            changed = True
+
+    if changed:
         db.add(user)
         db.commit()
         db.refresh(user)

@@ -8,6 +8,7 @@ from schemas import ConnectionsRequest, ClaimSlugRequest
 from sqlalchemy import or_
 from collections import defaultdict, deque 
 from fastapi.middleware.cors import CORSMiddleware
+from linkedin_utils import normalize_linkedin_slug, find_ghost_profiles_for_slug, migrate_ghost_edges_to_user
 
 app = FastAPI()
 app.include_router(auth_router)
@@ -21,7 +22,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 @app.get("/")
 def root():
     return {"message": "Six Degrees API running"}
@@ -96,7 +96,7 @@ def me(current_user: User = Depends(get_current_user)):
 
 @app.post("/me/slug")
 def claim_slug(request: ClaimSlugRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    slug = request.linkedin_slug.strip().lower()
+    slug = normalize_linkedin_slug(request.linkedin_slug)
     if not slug:
         raise HTTPException(status_code=400, detail="Linkedin is required")
     
@@ -106,38 +106,26 @@ def claim_slug(request: ClaimSlugRequest, current_user: User = Depends(get_curre
     
     current_user.linkedin_slug = slug 
     db.add(current_user)
+    migrated = migrate_ghost_edges_to_user(db, current_user, slug)
     db.commit()
     db.refresh(current_user)
 
-    ghost = db.query(GhostProfile).filter(GhostProfile.linkedin_slug == slug).first()
-    if not ghost:
-        return {"message": "Linkedin claimed", "linkedin_slug": slug, "migrated": 0}
-    
-    pending_edges = db.query(GhostEdge).filter(GhostEdge.ghost_id == ghost.id).all()
-    migrated = 0
-
-    for pe in pending_edges:
-        a = min(pe.src_user_id, current_user.id)
-        b = max(pe.src_user_id, current_user.id)
-
-        exists = db.query(Connection).filter(Connection.user_id_1 == a, Connection.user_id_2 == b).first()
-        if not exists:
-            db.add(Connection(user_id_1 = a, user_id_2 = b))
-            migrated += 1
-        db.delete(pe)
-    db.delete(ghost)
-    db.commit()
-    return {"message": "Linkedin claimed + ghost migrated", "linkedin_slug": slug, "migrated": migrated}
+    if migrated:
+        return {"message": "Linkedin claimed + ghost migrated", "linkedin_slug": slug, "migrated": migrated}
+    return {"message": "Linkedin claimed", "linkedin_slug": slug, "migrated": 0}
 
 
 @app.post("/connections")
 def add_connections(request: ConnectionsRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    slug = request.linkedin_slug.strip().lower()
+    slug = normalize_linkedin_slug(request.linkedin_slug)
+    if not slug:
+        raise HTTPException(status_code=400, detail="Linkedin is required")
     target_user = db.query(User).filter(User.linkedin_slug == slug).first()
     
     # target is unregistered -> ghost profile 
     if not(target_user):
-        ghost = db.query(GhostProfile).filter(GhostProfile.linkedin_slug == slug).first()
+        ghosts = find_ghost_profiles_for_slug(db, slug)
+        ghost = ghosts[0] if ghosts else None
         if not(ghost):
             ghost = GhostProfile(linkedin_slug = slug)
 
@@ -201,7 +189,7 @@ def get_connections(current_user: User = Depends(get_current_user), db: Session 
 
 @app.get("/search")
 def degree(linkedin_slug: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    target_slug = linkedin_slug.strip().lower()
+    target_slug = normalize_linkedin_slug(linkedin_slug)
     target_user = db.query(User).filter(User.linkedin_slug == target_slug).first()
     if not(target_user):
         raise HTTPException(status_code=404, detail="User not found")

@@ -81,6 +81,9 @@ function normalizeLinkedInSlug(input) {
   const m = s.match(/(?:^|\/)(?:in|pub)\/([^/?#]+)/i);
   if (m?.[1]) return safeDecode(m[1]).toLowerCase();
 
+  // If it still looks like LinkedIn but we couldn't extract a profile identifier, don't treat it as a slug.
+  if (/linkedin\.com/i.test(s)) return "";
+
   // Otherwise treat as a slug, stripping any accidental path/query bits.
   return safeDecode(stripDecorations(s)).toLowerCase();
 }
@@ -112,6 +115,23 @@ function linkedinUrl(slug) {
   const s = normalizeLinkedInSlug(slug);
   if (!s) return "";
   return `https://www.linkedin.com/in/${encodeURIComponent(s)}/`;
+}
+
+function nodeDisplayLabel(d) {
+  const label = String(d?.label ?? "").trim();
+  const normalizedSlug = normalizeLinkedInSlug(d?.linkedin_slug);
+  const url = linkedinUrl(d?.linkedin_slug);
+
+  // For normal user nodes, `label` is the full name already.
+  if (d?.type !== "ghost") return label || url || "";
+
+  // For ghost nodes, backend may set `label` to either full_name OR raw slug.
+  // If it looks like we're holding only the slug, prefer showing the full URL.
+  const looksLikeJustSlug = !!normalizedSlug && label.toLowerCase() === normalizedSlug;
+  const looksLikeLinkedInUrl = /linkedin\.com/i.test(label);
+
+  if (label && !looksLikeJustSlug && !looksLikeLinkedInUrl) return label;
+  return url || label || "";
 }
 
 function edgeKey(a, b) {
@@ -252,7 +272,7 @@ function renderGraph({ nodes, edges }) {
         })
     );
 
-  node.append("title").text((d) => d.label);
+  node.append("title").text((d) => nodeDisplayLabel(d));
 
   // Add labels
   const labels = g.append("g")
@@ -263,7 +283,7 @@ function renderGraph({ nodes, edges }) {
     .attr("fill", "#222")
     .attr("text-anchor", "middle")
     .attr("dy", 18)
-    .text((d) => d.label);
+    .text((d) => nodeDisplayLabel(d));
 
   graphState.value = {
     nodes: n,
@@ -500,7 +520,7 @@ onMounted(async () => {
           <div class="text-sm font-semibold text-gray-900">{{ c.full_name }}</div>
           <div class="text-xs text-gray-500">
             <a
-              v-if="c.linkedin_slug"
+              v-if="normalizeLinkedInSlug(c.linkedin_slug)"
               class="text-blue-700 hover:underline"
               :href="linkedinUrl(c.linkedin_slug)"
               target="_blank"
@@ -525,7 +545,7 @@ onMounted(async () => {
           <div class="text-sm font-semibold text-gray-900">{{ u.full_name }}</div>
           <div class="text-xs text-gray-500">
             <a
-              v-if="u.linkedin_slug"
+              v-if="normalizeLinkedInSlug(u.linkedin_slug)"
               class="text-blue-700 hover:underline"
               :href="linkedinUrl(u.linkedin_slug)"
               target="_blank"
