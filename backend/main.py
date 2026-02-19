@@ -8,7 +8,12 @@ from schemas import ConnectionsRequest, ClaimSlugRequest
 from sqlalchemy import or_
 from collections import defaultdict, deque 
 from fastapi.middleware.cors import CORSMiddleware
-from linkedin_utils import normalize_linkedin_slug, find_ghost_profiles_for_slug, migrate_ghost_edges_to_user
+from linkedin_utils import (
+    canonicalize_ghost_profiles_for_slug,
+    find_user_for_slug,
+    normalize_linkedin_slug,
+    migrate_ghost_edges_to_user,
+)
 
 app = FastAPI()
 app.include_router(auth_router)
@@ -41,7 +46,8 @@ def list_users(current_user: User = Depends(get_current_user), db: Session = Dep
 @app.get("/graph/all")
 def graph_all(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     users = db.query(User).all()
-    edges = db.query(Connection).all()
+    # Defensive: ignore any self-loop connections if they exist in the DB.
+    edges = db.query(Connection).filter(Connection.user_id_1 != Connection.user_id_2).all()
 
     nodes = [
         {
@@ -100,8 +106,8 @@ def claim_slug(request: ClaimSlugRequest, current_user: User = Depends(get_curre
     if not slug:
         raise HTTPException(status_code=400, detail="Linkedin is required")
     
-    existing_owner = (db.query(User).filter(User.linkedin_slug == slug, User.id != current_user.id)).first()
-    if existing_owner:
+    existing_owner = find_user_for_slug(db, slug)
+    if existing_owner and existing_owner.id != current_user.id:
         raise HTTPException(status_code=400, detail="Linkedin account claimed")
     
     current_user.linkedin_slug = slug 
@@ -120,12 +126,15 @@ def add_connections(request: ConnectionsRequest, current_user: User = Depends(ge
     slug = normalize_linkedin_slug(request.linkedin_slug)
     if not slug:
         raise HTTPException(status_code=400, detail="Linkedin is required")
-    target_user = db.query(User).filter(User.linkedin_slug == slug).first()
+    # If the current user has a slug, block self-connecting immediately.
+    if current_user.linkedin_slug and normalize_linkedin_slug(current_user.linkedin_slug) == slug:
+        raise HTTPException(status_code=400, detail="Cannot connect with yourself")
+
+    target_user = find_user_for_slug(db, slug)
     
     # target is unregistered -> ghost profile 
     if not(target_user):
-        ghosts = find_ghost_profiles_for_slug(db, slug)
-        ghost = ghosts[0] if ghosts else None
+        ghost = canonicalize_ghost_profiles_for_slug(db, slug)
         if not(ghost):
             ghost = GhostProfile(linkedin_slug = slug)
 
@@ -148,6 +157,8 @@ def add_connections(request: ConnectionsRequest, current_user: User = Depends(ge
         raise HTTPException(status_code=400, detail="Cannot connect with yourself")
     a = min(current_user.id, target_user.id)
     b = max(current_user.id, target_user.id)
+    if a == b:
+        raise HTTPException(status_code=400, detail="Cannot connect with yourself")
 
     if (db.query(Connection).filter(Connection.user_id_1 == a, Connection.user_id_2 == b).first()):
         return {"message": "Connection already exists"}
@@ -165,13 +176,23 @@ def add_connections(request: ConnectionsRequest, current_user: User = Depends(ge
 @app.get("/connections")
 def get_connections(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
 
-    edges = db.query(Connection).filter(or_(Connection.user_id_1 == current_user.id, Connection.user_id_2 == current_user.id)).all()
+    edges = (
+        db.query(Connection)
+        .filter(
+            Connection.user_id_1 != Connection.user_id_2,
+            or_(Connection.user_id_1 == current_user.id, Connection.user_id_2 == current_user.id),
+        )
+        .all()
+    )
     other_ids = set()
     for edge in edges:
         if edge.user_id_1 == current_user.id:
             other_ids.add(edge.user_id_2)
         else:
             other_ids.add(edge.user_id_1)
+
+    # Extra safety: never show "yourself" as a connection.
+    other_ids.discard(current_user.id)
     
     if not other_ids:
         return []
@@ -187,14 +208,100 @@ def get_connections(current_user: User = Depends(get_current_user), db: Session 
     ]
 
 
+@app.get("/connections/pending")
+def get_pending_connections(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    pending = db.query(GhostEdge).filter(GhostEdge.src_user_id == current_user.id).all()
+    if not pending:
+        return []
+
+    ghost_ids = [p.ghost_id for p in pending]
+    ghosts = db.query(GhostProfile).filter(GhostProfile.id.in_(ghost_ids)).all()
+    by_id = {g.id: g for g in ghosts}
+
+    out = []
+    for p in pending:
+        g = by_id.get(p.ghost_id)
+        if not g:
+            continue
+        out.append(
+            {
+                "id": g.id,
+                "full_name": g.full_name,
+                "linkedin_slug": g.linkedin_slug,
+            }
+        )
+    return out
+
+
+@app.delete("/connections/pending/{ghost_id}")
+def remove_pending_connection(ghost_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    gid = (ghost_id or "").strip()
+    if not gid:
+        raise HTTPException(status_code=400, detail="ghost_id is required")
+
+    edge = (
+        db.query(GhostEdge)
+        .filter(GhostEdge.src_user_id == current_user.id, GhostEdge.ghost_id == gid)
+        .first()
+    )
+    if not edge:
+        raise HTTPException(status_code=404, detail="Pending connection not found")
+
+    db.delete(edge)
+
+    # Clean up the ghost profile if no one else references it.
+    remaining = db.query(GhostEdge).filter(GhostEdge.ghost_id == gid).count()
+    if remaining == 0:
+        ghost = db.query(GhostProfile).filter(GhostProfile.id == gid).first()
+        if ghost:
+            db.delete(ghost)
+
+    db.commit()
+    return {"message": "pending connection removed", "ghost_id": gid}
+
+
+@app.delete("/connections/{user_id}")
+def remove_connection(user_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    target_id = (user_id or "").strip()
+    if not target_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+
+    # Cleanup path: if the DB contains a self-loop, allow deleting it.
+    if target_id == current_user.id:
+        loops = (
+            db.query(Connection)
+            .filter(Connection.user_id_1 == current_user.id, Connection.user_id_2 == current_user.id)
+            .all()
+        )
+        if not loops:
+            raise HTTPException(status_code=404, detail="Connection not found")
+        removed = len(loops)
+        for c in loops:
+            db.delete(c)
+        db.commit()
+        return {"message": "self connection removed", "removed": removed}
+
+    a = min(current_user.id, target_id)
+    b = max(current_user.id, target_id)
+
+    conn = db.query(Connection).filter(Connection.user_id_1 == a, Connection.user_id_2 == b).first()
+    if not conn:
+        raise HTTPException(status_code=404, detail="Connection not found")
+
+    db.delete(conn)
+    db.commit()
+
+    return {"message": "connection removed", "from": current_user.id, "to": target_id}
+
+
 @app.get("/search")
 def degree(linkedin_slug: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     target_slug = normalize_linkedin_slug(linkedin_slug)
-    target_user = db.query(User).filter(User.linkedin_slug == target_slug).first()
+    target_user = find_user_for_slug(db, target_slug)
     if not(target_user):
         raise HTTPException(status_code=404, detail="User not found")
     
-    edges = db.query(Connection).all()
+    edges = db.query(Connection).filter(Connection.user_id_1 != Connection.user_id_2).all()
     adj = defaultdict(list)
 
     for e in edges:
@@ -253,7 +360,7 @@ def degree_by_id(user_id: str, current_user: User = Depends(get_current_user), d
     if not target_user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    edges = db.query(Connection).all()
+    edges = db.query(Connection).filter(Connection.user_id_1 != Connection.user_id_2).all()
     adj = defaultdict(list)
 
     for e in edges:

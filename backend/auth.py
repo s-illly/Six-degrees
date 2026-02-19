@@ -10,7 +10,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from database import get_db
 from models import User
-from linkedin_utils import normalize_linkedin_slug, migrate_ghost_edges_to_user
+from linkedin_utils import find_user_for_slug, normalize_linkedin_slug, migrate_ghost_edges_to_user
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 load_dotenv()
@@ -92,8 +92,8 @@ async def login(code: str, state: str, request: Request, db: Session = Depends(g
     # migrate any matching ghost nodes into real connections.
     changed = False
     if inferred_slug and not user.linkedin_slug:
-        existing_owner = db.query(User).filter(User.linkedin_slug == inferred_slug, User.id != user.id).first()
-        if not existing_owner:
+        existing_owner = find_user_for_slug(db, inferred_slug)
+        if (not existing_owner) or (existing_owner.id == user.id):
             user.linkedin_slug = inferred_slug
             changed = True
 

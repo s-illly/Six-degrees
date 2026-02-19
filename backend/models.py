@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, ForeignKey, UniqueConstraint
+from sqlalchemy import CheckConstraint, Column, String, ForeignKey, UniqueConstraint
 from sqlalchemy.dialects.sqlite import BLOB
 import uuid
 
@@ -21,6 +21,7 @@ class Connection(Base):
 
     __table_args__ = (
         UniqueConstraint("user_id_1", "user_id_2", name="unique_connection"),
+        CheckConstraint("user_id_1 <> user_id_2", name="no_self_connection"),
     )
 
 class GhostProfile(Base):

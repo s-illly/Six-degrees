@@ -1,6 +1,8 @@
 import re
 from urllib.parse import unquote, urlparse
 
+from typing import Dict, List, Optional
+
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
@@ -68,11 +70,91 @@ def find_ghost_profiles_for_slug(db: Session, slug: str) -> list[GhostProfile]:
         .all()
     )
 
-    out: dict[str, GhostProfile] = {}
+    out: Dict[str, GhostProfile] = {}
     for g in candidates:
         if normalize_linkedin_slug(g.linkedin_slug) == normalized:
             out[g.id] = g
     return list(out.values())
+
+
+def find_user_for_slug(db: Session, slug: str) -> Optional[User]:
+    normalized = normalize_linkedin_slug(slug)
+    if not normalized:
+        return None
+
+    candidates = (
+        db.query(User)
+        .filter(
+            or_(
+                User.linkedin_slug == normalized,
+                User.linkedin_slug.ilike(f"%/in/{normalized}%"),
+                User.linkedin_slug.ilike(f"%linkedin.com/in/{normalized}%"),
+                User.linkedin_slug.ilike(f"%{normalized}%"),
+            )
+        )
+        .all()
+    )
+
+    matches: List[User] = []
+    for u in candidates:
+        if normalize_linkedin_slug(u.linkedin_slug) == normalized:
+            matches.append(u)
+
+    if not matches:
+        return None
+
+    # If multiple matches exist due to legacy bad data, prefer an exact normalized match.
+    exact = next((u for u in matches if (u.linkedin_slug or "").strip().lower() == normalized), None)
+    user = exact or matches[0]
+
+    # Best-effort normalization of stored value (helps prevent future mismatches).
+    if user.linkedin_slug and user.linkedin_slug != normalized:
+        conflict = db.query(User).filter(User.linkedin_slug == normalized, User.id != user.id).first()
+        if not conflict:
+            user.linkedin_slug = normalized
+            db.add(user)
+
+    return user
+
+
+def canonicalize_ghost_profiles_for_slug(db: Session, slug: str) -> Optional[GhostProfile]:
+    normalized = normalize_linkedin_slug(slug)
+    if not normalized:
+        return None
+
+    ghosts = find_ghost_profiles_for_slug(db, normalized)
+    if not ghosts:
+        return None
+
+    canonical = next((g for g in ghosts if (g.linkedin_slug or "").strip().lower() == normalized), None) or ghosts[0]
+
+    # Merge other ghosts into canonical.
+    for g in ghosts:
+        if g.id == canonical.id:
+            continue
+        edges = db.query(GhostEdge).filter(GhostEdge.ghost_id == g.id).all()
+        for e in edges:
+            exists = (
+                db.query(GhostEdge)
+                .filter(GhostEdge.src_user_id == e.src_user_id, GhostEdge.ghost_id == canonical.id)
+                .first()
+            )
+            if exists:
+                db.delete(e)
+            else:
+                e.ghost_id = canonical.id
+                db.add(e)
+
+        db.delete(g)
+
+    # Normalize canonical stored slug if possible.
+    if canonical.linkedin_slug != normalized:
+        conflict = db.query(GhostProfile).filter(GhostProfile.linkedin_slug == normalized, GhostProfile.id != canonical.id).first()
+        if not conflict:
+            canonical.linkedin_slug = normalized
+            db.add(canonical)
+
+    return canonical
 
 
 def migrate_ghost_edges_to_user(db: Session, user: User, slug: str) -> int:
@@ -96,6 +178,9 @@ def migrate_ghost_edges_to_user(db: Session, user: User, slug: str) -> int:
 
             a = min(pe.src_user_id, user.id)
             b = max(pe.src_user_id, user.id)
+            if a == b:
+                db.delete(pe)
+                continue
 
             exists = db.query(Connection).filter(Connection.user_id_1 == a, Connection.user_id_2 == b).first()
             if not exists:

@@ -47,8 +47,11 @@ export const api = {
     searchPathByUserId: (user_id) => request(`/search/id?user_id=${encodeURIComponent(user_id)}`),
     usersList: () => request("/users"),
     connectionsList: () => request("/connections"),
+    pendingConnectionsList: () => request("/connections/pending"),
     addConnection: ({ linkedin_slug, full_name = "" }) =>
       request("/connections", { method: "POST", body: { linkedin_slug, full_name } }),
+    removeConnection: (user_id) => request(`/connections/${encodeURIComponent(user_id)}`, { method: "DELETE" }),
+    removePendingConnection: (ghost_id) => request(`/connections/pending/${encodeURIComponent(ghost_id)}`, { method: "DELETE" }),
     me: () => request("/me"),
 };
 

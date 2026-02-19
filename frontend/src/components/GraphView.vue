@@ -8,8 +8,10 @@ const status = ref("Loading your network…");
 
 const me = ref(null);
 const connections = ref([]);
+const pendingConnections = ref([]);
 const users = ref([]);
 const connectionsLoading = ref(false);
+const pendingLoading = ref(false);
 const usersLoading = ref(false);
 const graphLoading = ref(false);
 
@@ -19,6 +21,10 @@ const addLoading = ref(false);
 const addError = ref("");
 const addSuccess = ref("");
 const listError = ref("");
+const removeError = ref("");
+const removingId = ref("");
+const pendingError = ref("");
+const removingPendingId = ref("");
 const usersError = ref("");
 const graphError = ref("");
 
@@ -344,6 +350,19 @@ async function loadConnections() {
   }
 }
 
+async function loadPendingConnections() {
+  pendingError.value = "";
+  pendingLoading.value = true;
+  try {
+    const data = await api.pendingConnectionsList();
+    pendingConnections.value = Array.isArray(data) ? data : [];
+  } catch (e) {
+    pendingError.value = e?.message || "Failed to load pending connections";
+  } finally {
+    pendingLoading.value = false;
+  }
+}
+
 async function loadUsers() {
   usersError.value = "";
   usersLoading.value = true;
@@ -390,7 +409,7 @@ async function handleClaimSlug() {
   try {
     const res = await api.claimMySlug(slug);
     claimSuccess.value = res?.message ? String(res.message) : "LinkedIn claimed";
-    await Promise.all([loadMe(), loadUsers(), loadGraph()]);
+    await Promise.all([loadMe(), loadConnections(), loadPendingConnections(), loadUsers(), loadGraph()]);
   } catch (e) {
     claimError.value = e?.message || "Failed to claim LinkedIn";
   } finally {
@@ -414,7 +433,7 @@ async function handleAddConnection() {
     addSuccess.value = res?.message ? String(res.message) : "Connection updated";
     addSlug.value = "";
     addFullName.value = "";
-    await Promise.all([loadConnections(), loadGraph()]);
+    await Promise.all([loadConnections(), loadPendingConnections(), loadGraph()]);
   } catch (e) {
     addError.value = e?.message || "Failed to add connection";
   } finally {
@@ -422,9 +441,41 @@ async function handleAddConnection() {
   }
 }
 
+async function handleRemoveConnection(userId) {
+  removeError.value = "";
+  const id = String(userId || "").trim();
+  if (!id) return;
+
+  removingId.value = id;
+  try {
+    await api.removeConnection(id);
+    await Promise.all([loadConnections(), loadGraph()]);
+  } catch (e) {
+    removeError.value = e?.message || "Failed to remove connection";
+  } finally {
+    removingId.value = "";
+  }
+}
+
+async function handleRemovePending(ghostId) {
+  pendingError.value = "";
+  const id = String(ghostId || "").trim();
+  if (!id) return;
+
+  removingPendingId.value = id;
+  try {
+    await api.removePendingConnection(id);
+    await Promise.all([loadPendingConnections(), loadGraph()]);
+  } catch (e) {
+    pendingError.value = e?.message || "Failed to remove pending connection";
+  } finally {
+    removingPendingId.value = "";
+  }
+}
+
 onMounted(async () => {
   status.value = "";
-  await Promise.all([loadMe(), loadConnections(), loadUsers(), loadGraph()]);
+  await Promise.all([loadMe(), loadConnections(), loadPendingConnections(), loadUsers(), loadGraph()]);
 });
 </script>
 
@@ -513,11 +564,23 @@ onMounted(async () => {
       <div class="text-sm font-bold text-gray-800">My connections</div>
       <p v-if="connectionsLoading" class="mt-2 text-sm text-gray-600">Loading connections…</p>
       <p v-else-if="listError" class="mt-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800" role="alert">{{ listError }}</p>
+      <p v-else-if="removeError" class="mt-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800" role="alert">{{ removeError }}</p>
       <p v-else-if="connections.length === 0" class="mt-2 text-sm text-gray-600">No connections yet.</p>
 
       <ul v-else class="mt-2 space-y-2" aria-label="Connections list">
         <li v-for="c in connections" :key="c.id" class="rounded-xl border border-gray-200 bg-white px-3 py-2">
-          <div class="text-sm font-semibold text-gray-900">{{ c.full_name }}</div>
+          <div class="flex items-start justify-between gap-3">
+            <div class="text-sm font-semibold text-gray-900">{{ c.full_name }}</div>
+            <button
+              type="button"
+              class="text-xs font-semibold text-red-700 hover:underline disabled:cursor-not-allowed disabled:opacity-60"
+              :disabled="removingId === c.id"
+              @click="handleRemoveConnection(c.id)"
+            >
+              <span v-if="removingId === c.id">Removing…</span>
+              <span v-else>Remove</span>
+            </button>
+          </div>
           <div class="text-xs text-gray-500">
             <a
               v-if="normalizeLinkedInSlug(c.linkedin_slug)"
@@ -535,28 +598,40 @@ onMounted(async () => {
 
       <div class="my-4 h-px w-full bg-gray-200" role="separator" aria-hidden="true"></div>
 
-      <div class="text-sm font-bold text-gray-800">All accounts</div>
-      <p v-if="usersLoading" class="mt-2 text-sm text-gray-600">Loading users…</p>
-      <p v-else-if="usersError" class="mt-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800" role="alert">{{ usersError }}</p>
-      <p v-else-if="users.length === 0" class="mt-2 text-sm text-gray-600">No users yet.</p>
+      <div class="text-sm font-bold text-gray-800">Pending (ghost)</div>
+      <p v-if="pendingLoading" class="mt-2 text-sm text-gray-600">Loading pending…</p>
+      <p v-else-if="pendingError" class="mt-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800" role="alert">{{ pendingError }}</p>
+      <p v-else-if="pendingConnections.length === 0" class="mt-2 text-sm text-gray-600">No pending connections.</p>
 
-      <ul v-else class="mt-2 space-y-2" aria-label="Users list">
-        <li v-for="u in users" :key="u.id" class="rounded-xl border border-gray-200 bg-white px-3 py-2">
-          <div class="text-sm font-semibold text-gray-900">{{ u.full_name }}</div>
+      <ul v-else class="mt-2 space-y-2" aria-label="Pending connections list">
+        <li v-for="g in pendingConnections" :key="g.id" class="rounded-xl border border-gray-200 bg-white px-3 py-2">
+          <div class="flex items-start justify-between gap-3">
+            <div class="text-sm font-semibold text-gray-900">{{ g.full_name || g.linkedin_slug || "(unknown)" }}</div>
+            <button
+              type="button"
+              class="text-xs font-semibold text-red-700 hover:underline disabled:cursor-not-allowed disabled:opacity-60"
+              :disabled="removingPendingId === g.id"
+              @click="handleRemovePending(g.id)"
+            >
+              <span v-if="removingPendingId === g.id">Removing…</span>
+              <span v-else>Remove</span>
+            </button>
+          </div>
           <div class="text-xs text-gray-500">
             <a
-              v-if="normalizeLinkedInSlug(u.linkedin_slug)"
+              v-if="normalizeLinkedInSlug(g.linkedin_slug)"
               class="text-blue-700 hover:underline"
-              :href="linkedinUrl(u.linkedin_slug)"
+              :href="linkedinUrl(g.linkedin_slug)"
               target="_blank"
               rel="noopener noreferrer"
             >
-              {{ u.linkedin_slug }}
+              {{ g.linkedin_slug }}
             </a>
             <span v-else>—</span>
           </div>
         </li>
       </ul>
+
     </section>
 
     <section class="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm" aria-label="Graph visualization section">
