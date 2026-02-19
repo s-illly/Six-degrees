@@ -1,4 +1,4 @@
-const API_BASE = "http://127.0.0.1:8000";
+export const API_BASE = "http://127.0.0.1:8000";
 
 export function getToken() {
     return localStorage.getItem("token");
@@ -41,8 +41,10 @@ async function request(path, { method = "GET", body } = {}) {
 
 
 export const api = {
-    login: (email, password) => request("/login", { method: "POST", body: { email, password }}),
+    claimMySlug: (linkedin_slug) => request("/me/slug", { method: "POST", body: { linkedin_slug } }),
     graph: () => request("/graph"),
+    graphAll: () => request("/graph/all"),
+    usersList: () => request("/users"),
     connectionsList: () => request("/connections"),
     addConnection: ({ linkedin_slug, full_name = "" }) =>
       request("/connections", { method: "POST", body: { linkedin_slug, full_name } }),

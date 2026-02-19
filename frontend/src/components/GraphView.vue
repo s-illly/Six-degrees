@@ -8,7 +8,9 @@ const status = ref("Loading your network…");
 
 const me = ref(null);
 const connections = ref([]);
+const users = ref([]);
 const connectionsLoading = ref(false);
+const usersLoading = ref(false);
 const graphLoading = ref(false);
 
 const addSlug = ref("");
@@ -17,7 +19,16 @@ const addLoading = ref(false);
 const addError = ref("");
 const addSuccess = ref("");
 const listError = ref("");
+const usersError = ref("");
 const graphError = ref("");
+
+const mySlug = ref("");
+const claimLoading = ref(false);
+const claimError = ref("");
+const claimSuccess = ref("");
+
+const normalizedMySlug = computed(() => mySlug.value.trim().toLowerCase());
+const canClaim = computed(() => normalizedMySlug.value.length > 0 && !claimLoading.value);
 
 const normalizedSlug = computed(() => addSlug.value.trim().toLowerCase());
 const canSubmit = computed(() => normalizedSlug.value.length > 0 && !addLoading.value);
@@ -127,11 +138,24 @@ async function loadConnections() {
   }
 }
 
+async function loadUsers() {
+  usersError.value = "";
+  usersLoading.value = true;
+  try {
+    const data = await api.usersList();
+    users.value = Array.isArray(data) ? data : [];
+  } catch (e) {
+    usersError.value = e?.message || "Failed to load users";
+  } finally {
+    usersLoading.value = false;
+  }
+}
+
 async function loadGraph() {
   graphError.value = "";
   graphLoading.value = true;
   try {
-    const data = await api.graph();
+    const data = await api.graphAll();
     renderGraph(data);
   } catch (e) {
     graphError.value = e?.message || "Failed to load graph";
@@ -143,8 +167,27 @@ async function loadGraph() {
 async function loadMe() {
   try {
     me.value = await api.me();
+    if (!mySlug.value && me.value?.linkedin_slug) mySlug.value = me.value.linkedin_slug;
   } catch {
     // non-fatal; UI can work without this.
+  }
+}
+
+async function handleClaimSlug() {
+  claimError.value = "";
+  claimSuccess.value = "";
+  const slug = normalizedMySlug.value;
+  if (!slug) return;
+
+  claimLoading.value = true;
+  try {
+    const res = await api.claimMySlug(slug);
+    claimSuccess.value = res?.message ? String(res.message) : "LinkedIn claimed";
+    await Promise.all([loadMe(), loadUsers(), loadGraph()]);
+  } catch (e) {
+    claimError.value = e?.message || "Failed to claim LinkedIn";
+  } finally {
+    claimLoading.value = false;
   }
 }
 
@@ -174,15 +217,51 @@ async function handleAddConnection() {
 
 onMounted(async () => {
   status.value = "";
-  await Promise.all([loadMe(), loadConnections(), loadGraph()]);
+  await Promise.all([loadMe(), loadConnections(), loadUsers(), loadGraph()]);
 });
 </script>
 
 <template>
   <div class="grid gap-4 lg:grid-cols-[380px_1fr]">
-    <section class="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm lg:sticky lg:top-[76px]" aria-label="Connections panel">
+    <section class="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm lg:sticky lg:top-19" aria-label="Connections panel">
       <h2 class="text-lg font-bold">Connections</h2>
       <p class="mt-1 text-sm text-gray-600" v-if="me?.full_name">Signed in as <strong>{{ me.full_name }}</strong>.</p>
+
+      <form
+        v-if="me && !me.linkedin_slug"
+        class="mt-4 space-y-3 rounded-xl border border-amber-200 bg-amber-50 p-3"
+        @submit.prevent="handleClaimSlug"
+        aria-label="Claim LinkedIn slug form"
+      >
+        <div class="text-sm font-semibold text-amber-900">Claim your LinkedIn</div>
+        <div class="text-xs text-amber-800">Add your LinkedIn slug so others can connect to you.</div>
+
+        <div>
+          <label class="block text-sm font-semibold text-gray-800" for="my_linkedin_slug">LinkedIn slug</label>
+          <input
+            id="my_linkedin_slug"
+            class="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-100"
+            v-model="mySlug"
+            placeholder="e.g. janedoe"
+            autocomplete="off"
+            inputmode="text"
+            required
+          />
+          <div class="mt-1 text-xs text-gray-600">This is the part after linkedin.com/in/</div>
+        </div>
+
+        <button
+          class="inline-flex w-full items-center justify-center rounded-lg bg-amber-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-amber-700 disabled:cursor-not-allowed disabled:opacity-60"
+          type="submit"
+          :disabled="!canClaim"
+        >
+          <span v-if="claimLoading">Claiming…</span>
+          <span v-else>Claim LinkedIn</span>
+        </button>
+
+        <p v-if="claimError" class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800" role="alert">{{ claimError }}</p>
+        <p v-else-if="claimSuccess" class="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800" role="status">{{ claimSuccess }}</p>
+      </form>
 
       <form class="mt-4 space-y-3" @submit.prevent="handleAddConnection" aria-label="Add connection form">
         <div>
@@ -225,7 +304,7 @@ onMounted(async () => {
 
       <div class="my-4 h-px w-full bg-gray-200" role="separator" aria-hidden="true"></div>
 
-      <div class="text-sm font-bold text-gray-800">All connections</div>
+      <div class="text-sm font-bold text-gray-800">My connections</div>
       <p v-if="connectionsLoading" class="mt-2 text-sm text-gray-600">Loading connections…</p>
       <p v-else-if="listError" class="mt-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800" role="alert">{{ listError }}</p>
       <p v-else-if="connections.length === 0" class="mt-2 text-sm text-gray-600">No connections yet.</p>
@@ -234,6 +313,20 @@ onMounted(async () => {
         <li v-for="c in connections" :key="c.id" class="rounded-xl border border-gray-200 bg-white px-3 py-2">
           <div class="text-sm font-semibold text-gray-900">{{ c.full_name }}</div>
           <div class="text-xs text-gray-500">{{ c.linkedin_slug }}</div>
+        </li>
+      </ul>
+
+      <div class="my-4 h-px w-full bg-gray-200" role="separator" aria-hidden="true"></div>
+
+      <div class="text-sm font-bold text-gray-800">All accounts</div>
+      <p v-if="usersLoading" class="mt-2 text-sm text-gray-600">Loading users…</p>
+      <p v-else-if="usersError" class="mt-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800" role="alert">{{ usersError }}</p>
+      <p v-else-if="users.length === 0" class="mt-2 text-sm text-gray-600">No users yet.</p>
+
+      <ul v-else class="mt-2 space-y-2" aria-label="Users list">
+        <li v-for="u in users" :key="u.id" class="rounded-xl border border-gray-200 bg-white px-3 py-2">
+          <div class="text-sm font-semibold text-gray-900">{{ u.full_name }}</div>
+          <div class="text-xs text-gray-500">{{ u.linkedin_slug }}</div>
         </li>
       </ul>
     </section>
@@ -245,7 +338,7 @@ onMounted(async () => {
       </div>
       <p v-if="status" class="mb-2 text-sm text-gray-600">{{ status }}</p>
       <p v-if="graphError" class="mb-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800" role="alert">{{ graphError }}</p>
-      <div ref="host" class="min-h-[600px] w-full overflow-hidden rounded-2xl border border-gray-200 bg-white" aria-label="Graph visualization"></div>
+      <div ref="host" class="min-h-150 w-full overflow-hidden rounded-2xl border border-gray-200 bg-white" aria-label="Graph visualization"></div>
     </section>
   </div>
 </template>

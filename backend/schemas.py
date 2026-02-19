@@ -1,15 +1,5 @@
 from pydantic import BaseModel
 
-class LoginRequest(BaseModel):
-    email: str
-    password: str
-
-class RegisterRequest(BaseModel):
-    full_name: str
-    email: str 
-    password: str 
-    linkedin_slug: str 
-
 class ConnectionsRequest(BaseModel):
     full_name: str
     linkedin_slug: str 
@@ -17,3 +7,6 @@ class ConnectionsRequest(BaseModel):
 class UserPublic(BaseModel):
     full_name: str 
     linkedin_slug: str 
+
+class ClaimSlugRequest(BaseModel):
+    linkedin_slug: str

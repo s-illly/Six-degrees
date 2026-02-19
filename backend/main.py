@@ -2,18 +2,17 @@ from fastapi import FastAPI, Depends, HTTPException
 from database import engine, get_db
 from models import Base, User, Connection, GhostProfile, GhostEdge
 from sqlalchemy.orm import Session
-from passlib.context import CryptContext
-from auth import create_access_token, get_current_user
-from schemas import LoginRequest, RegisterRequest, ConnectionsRequest
+from auth import get_current_user
+from auth import router as auth_router
+from schemas import ConnectionsRequest, ClaimSlugRequest
 from sqlalchemy import or_
 from collections import defaultdict, deque 
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
+app.include_router(auth_router)
 
 Base.metadata.create_all(bind=engine)
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
 
 app.add_middleware(
     CORSMiddleware,
@@ -27,64 +26,109 @@ app.add_middleware(
 def root():
     return {"message": "Six Degrees API running"}
 
-@app.post("/register")
-def register(request: RegisterRequest, db: Session = Depends(get_db)):
-    slug = request.linkedin_slug.strip().lower()
-    
-    existing_user = db.query(User).filter(User.email == request.email).first()
-    if existing_user:
-        raise HTTPException(status_code=400, detail="Email already registered")
+@app.get("/users")
+def list_users(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    users = db.query(User).all()
+    return [
+        {
+            "id": u.id,
+            "full_name": u.full_name,
+            "linkedin_slug": u.linkedin_slug,
+        }
+        for u in users
+    ]
 
-    hashed_password = pwd_context.hash(request.password)
+@app.get("/graph/all")
+def graph_all(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    users = db.query(User).all()
+    edges = db.query(Connection).all()
 
-    user = User(
-        full_name= request.full_name,
-        email= request.email,
-        password_hash= hashed_password,
-        linkedin_slug= slug 
-    )
+    nodes = [
+        {
+            "id": u.id,
+            "type": "user",
+            "label": u.full_name,
+            "linkedin_slug": u.linkedin_slug,
+        }
+        for u in users
+    ]
 
-    db.add(user)
-    db.commit()
-    db.refresh(user)
+    graph_edges = [
+        {
+            "source": e.user_id_1,
+            "target": e.user_id_2,
+            "type": "connection",
+        }
+        for e in edges
+    ]
 
-    # Create user from ghost profile 
-    existing_ghost = db.query(GhostProfile).filter(GhostProfile.linkedin_slug == slug).first()
-    if existing_ghost:
-        pending_edges = db.query(GhostEdge).filter(GhostEdge.ghost_id == existing_ghost.id).all()
+    # Include current user's pending edges to unregistered (ghost) profiles.
+    pending_edges = db.query(GhostEdge).filter(GhostEdge.src_user_id == current_user.id).all()
+    ghost_ids = {pe.ghost_id for pe in pending_edges}
+    ghosts = []
+    if ghost_ids:
+        ghosts = db.query(GhostProfile).filter(GhostProfile.id.in_(list(ghost_ids))).all()
 
-        for pe in pending_edges:
-            a = min(pe.src_user_id, user.id)
-            b = max(pe.src_user_id, user.id)
+    for g in ghosts:
+        nodes.append(
+            {
+                "id": g.id,
+                "type": "ghost",
+                "label": g.full_name or g.linkedin_slug,
+                "linkedin_slug": g.linkedin_slug,
+            }
+        )
 
-            exists = db.query(Connection).filter(Connection.user_id_1 == a, Connection.user_id_2 == b).first()
-            if not(exists):
-                db.add(Connection(user_id_1 = a, user_id_2 = b))
-        
-        for pe in pending_edges:
-            db.delete(pe)
-        db.delete(existing_ghost)
-        db.commit()
+    for pe in pending_edges:
+        graph_edges.append(
+            {
+                "source": pe.src_user_id,
+                "target": pe.ghost_id,
+                "type": "pending",
+            }
+        )
 
-    return {"message": "User created successfully"}
-
-@app.post("/login")
-def login(request: LoginRequest, db: Session = Depends(get_db)):
-    existing_user = db.query(User).filter(User.email == request.email).first()
-    if not(existing_user):
-        raise HTTPException(status_code=401, detail="Incorrect email or password")
-    if not(pwd_context.verify(request.password, existing_user.password_hash)):
-        raise HTTPException(status_code=401, detail="Incorrect password")
-    
-    token = create_access_token({"email": existing_user.email})
-    return {
-        "access_token": token,
-        "token_type": "bearer"
-    }
+    return {"nodes": nodes, "edges": graph_edges}
 
 @app.get("/me")
 def me(current_user: User = Depends(get_current_user)):
     return current_user
+
+@app.post("/me/slug")
+def claim_slug(request: ClaimSlugRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    slug = request.linkedin_slug.strip().lower()
+    if not slug:
+        raise HTTPException(status_code=400, detail="Linkedin is required")
+    
+    existing_owner = (db.query(User).filter(User.linkedin_slug == slug, User.id != current_user.id)).first()
+    if existing_owner:
+        raise HTTPException(status_code=400, detail="Linkedin account claimed")
+    
+    current_user.linkedin_slug = slug 
+    db.add(current_user)
+    db.commit()
+    db.refresh(current_user)
+
+    ghost = db.query(GhostProfile).filter(GhostProfile.linkedin_slug == slug).first()
+    if not ghost:
+        return {"message": "Linkedin claimed", "linkedin_slug": slug, "migrated": 0}
+    
+    pending_edges = db.query(GhostEdge).filter(GhostEdge.ghost_id == ghost.id).all()
+    migrated = 0
+
+    for pe in pending_edges:
+        a = min(pe.src_user_id, current_user.id)
+        b = max(pe.src_user_id, current_user.id)
+
+        exists = db.query(Connection).filter(Connection.user_id_1 == a, Connection.user_id_2 == b).first()
+        if not exists:
+            db.add(Connection(user_id_1 = a, user_id_2 = b))
+            migrated += 1
+        db.delete(pe)
+    db.delete(ghost)
+    db.commit()
+    return {"message": "Linkedin claimed + ghost migrated", "linkedin_slug": slug, "migrated": migrated}
+
 
 @app.post("/connections")
 def add_connections(request: ConnectionsRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
