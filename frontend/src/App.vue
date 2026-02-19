@@ -2,6 +2,7 @@
 import { ref, onMounted } from "vue";
 import { setToken, getToken, clearToken, API_BASE } from "./api";
 import GraphView from "./components/GraphView.vue";
+import { Analytics } from '@vercel/analytics/vue';
 
 const authError = ref("");
 const authLoading = ref(false);
@@ -35,6 +36,7 @@ onMounted(() => {
 </script>
 
 <template>
+  <Analytics />
   <div class="min-h-screen bg-gray-50 text-gray-900">
     <header class="sticky top-0 z-10 border-b border-gray-200 bg-white" role="banner">
       <div class="mx-auto flex max-w-6xl items-center justify-between px-4 py-3">
