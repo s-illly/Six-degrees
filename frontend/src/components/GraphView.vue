@@ -27,11 +27,159 @@ const claimLoading = ref(false);
 const claimError = ref("");
 const claimSuccess = ref("");
 
-const normalizedMySlug = computed(() => mySlug.value.trim().toLowerCase());
+function normalizeLinkedInSlug(input) {
+  const raw = String(input ?? "").trim();
+  if (!raw) return "";
+
+  // Common user inputs:
+  // - "janedoe"
+  // - "linkedin.com/in/janedoe" (no scheme)
+  // - "https://www.linkedin.com/in/janedoe/?trk=..."
+  // - "/in/janedoe" / "in/janedoe"
+  const s0 = raw.replace(/^@/, "");
+
+  const safeDecode = (v) => {
+    try {
+      return decodeURIComponent(v);
+    } catch {
+      return v;
+    }
+  };
+
+  const stripDecorations = (v) =>
+    v
+      .trim()
+      .replace(/^<|>$/g, "")
+      .replace(/\s+/g, "")
+      .replace(/[?#].*$/, "")
+      .replace(/\/+$/, "");
+
+  const s = stripDecorations(s0);
+
+  // If it looks like a LinkedIn URL (with or without scheme), parse it.
+  const looksLikeLinkedInHost = /^https?:\/\//i.test(s)
+    ? /linkedin\.com/i.test(s)
+    : /(^|\b)(www\.)?linkedin\.com\b/i.test(s);
+
+  if (looksLikeLinkedInHost) {
+    const withScheme = /^https?:\/\//i.test(s) ? s : `https://${s}`;
+    try {
+      const url = new URL(withScheme);
+      const parts = url.pathname.split("/").filter(Boolean);
+      const idx = parts.findIndex((p) => ["in", "pub"].includes(String(p).toLowerCase()));
+      if (idx >= 0 && parts[idx + 1]) return safeDecode(parts[idx + 1]).toLowerCase();
+      if (parts[0] && !["in", "pub"].includes(String(parts[0]).toLowerCase())) {
+        // Last-chance: if user pasted some odd LinkedIn path, take the last segment.
+        return safeDecode(parts[parts.length - 1]).toLowerCase();
+      }
+    } catch {
+      // fall through to regex
+    }
+  }
+
+  // Handle path-like inputs: "/in/janedoe" or "in/janedoe" or "linkedin.com/in/janedoe" (without scheme)
+  const m = s.match(/(?:^|\/)(?:in|pub)\/([^/?#]+)/i);
+  if (m?.[1]) return safeDecode(m[1]).toLowerCase();
+
+  // Otherwise treat as a slug, stripping any accidental path/query bits.
+  return safeDecode(stripDecorations(s)).toLowerCase();
+}
+
+const normalizedMySlug = computed(() => normalizeLinkedInSlug(mySlug.value));
 const canClaim = computed(() => normalizedMySlug.value.length > 0 && !claimLoading.value);
 
-const normalizedSlug = computed(() => addSlug.value.trim().toLowerCase());
+const normalizedSlug = computed(() => normalizeLinkedInSlug(addSlug.value));
 const canSubmit = computed(() => normalizedSlug.value.length > 0 && !addLoading.value);
+
+const searchName = ref("");
+const selectedUserId = ref("");
+const searchLoading = ref(false);
+const searchError = ref("");
+const searchResult = ref(null); // { degrees, path }
+
+const graphState = ref(null); // { nodes, edges, nodeSel, linkSel, labelSel }
+
+const normalizedSearch = computed(() => searchName.value.trim().toLowerCase());
+const searchMatches = computed(() => {
+  const q = normalizedSearch.value;
+  if (!q) return [];
+  return users.value
+    .filter((u) => (u.full_name || "").toLowerCase().includes(q))
+    .slice(0, 8);
+});
+
+function linkedinUrl(slug) {
+  const s = normalizeLinkedInSlug(slug);
+  if (!s) return "";
+  return `https://www.linkedin.com/in/${encodeURIComponent(s)}/`;
+}
+
+function edgeKey(a, b) {
+  const sa = String(a);
+  const sb = String(b);
+  return sa < sb ? `${sa}--${sb}` : `${sb}--${sa}`;
+}
+
+function clearHighlight() {
+  searchResult.value = null;
+  searchError.value = "";
+  selectedUserId.value = "";
+  if (!graphState.value) return;
+  const { linkSel, nodeSel, labelSel } = graphState.value;
+  linkSel
+    .attr("stroke-width", 2)
+    .attr("stroke-opacity", 0.6)
+    .attr("stroke", "#888");
+  nodeSel
+    .attr("stroke", "#fff")
+    .attr("stroke-width", 2)
+    .attr("opacity", 1);
+  labelSel
+    .attr("font-weight", 400)
+    .attr("opacity", 1);
+}
+
+function applyHighlight(path) {
+  if (!graphState.value) return;
+  const pathIds = Array.isArray(path) ? path.map((p) => p.id) : [];
+  if (pathIds.length === 0) {
+    clearHighlight();
+    return;
+  }
+
+  const nodeSet = new Set(pathIds.map(String));
+  const edgeSet = new Set();
+  for (let i = 0; i < pathIds.length - 1; i += 1) {
+    edgeSet.add(edgeKey(pathIds[i], pathIds[i + 1]));
+  }
+
+  const { linkSel, nodeSel, labelSel } = graphState.value;
+  linkSel
+    .attr("stroke", (d) => {
+      const s = typeof d.source === "object" ? d.source.id : d.source;
+      const t = typeof d.target === "object" ? d.target.id : d.target;
+      return d.type === "connection" && edgeSet.has(edgeKey(s, t)) ? "#4f8cff" : "#888";
+    })
+    .attr("stroke-width", (d) => {
+      const s = typeof d.source === "object" ? d.source.id : d.source;
+      const t = typeof d.target === "object" ? d.target.id : d.target;
+      return d.type === "connection" && edgeSet.has(edgeKey(s, t)) ? 5 : 2;
+    })
+    .attr("stroke-opacity", (d) => {
+      const s = typeof d.source === "object" ? d.source.id : d.source;
+      const t = typeof d.target === "object" ? d.target.id : d.target;
+      return d.type === "connection" && edgeSet.has(edgeKey(s, t)) ? 1 : 0.2;
+    });
+
+  nodeSel
+    .attr("opacity", (d) => (nodeSet.has(String(d.id)) ? 1 : 0.25))
+    .attr("stroke", (d) => (nodeSet.has(String(d.id)) ? "#4f8cff" : "#fff"))
+    .attr("stroke-width", (d) => (nodeSet.has(String(d.id)) ? 4 : 2));
+
+  labelSel
+    .attr("opacity", (d) => (nodeSet.has(String(d.id)) ? 1 : 0.25))
+    .attr("font-weight", (d) => (nodeSet.has(String(d.id)) ? 700 : 400));
+}
 
 function renderGraph({ nodes, edges }) {
   host.value.innerHTML = "";
@@ -80,6 +228,11 @@ function renderGraph({ nodes, edges }) {
     .attr("fill", (d) => (d.type === "ghost" ? "#aaa" : "#4f8cff"))
     .attr("stroke", "#fff")
     .attr("stroke-width", 2)
+    .style("cursor", (d) => (normalizeLinkedInSlug(d.linkedin_slug) ? "pointer" : "default"))
+    .on("click", (event, d) => {
+      const url = linkedinUrl(d.linkedin_slug);
+      if (url) window.open(url, "_blank", "noopener,noreferrer");
+    })
     .call(
       d3
         .drag()
@@ -112,6 +265,14 @@ function renderGraph({ nodes, edges }) {
     .attr("dy", 18)
     .text((d) => d.label);
 
+  graphState.value = {
+    nodes: n,
+    edges: links,
+    nodeSel: node,
+    linkSel: link,
+    labelSel: labels,
+  };
+
   sim.on("tick", () => {
     link
       .attr("x1", (d) => d.source.x)
@@ -123,6 +284,31 @@ function renderGraph({ nodes, edges }) {
 
     labels.attr("x", (d) => d.x).attr("y", (d) => d.y);
   });
+}
+
+async function runSearch(userId) {
+  searchError.value = "";
+  searchResult.value = null;
+  if (!userId) return;
+
+  searchLoading.value = true;
+  try {
+    const res = await api.searchPathByUserId(userId);
+    searchResult.value = res;
+    applyHighlight(res?.path || []);
+  } catch (e) {
+    searchError.value = e?.message || "Search failed";
+    clearHighlight();
+  } finally {
+    searchLoading.value = false;
+  }
+}
+
+function selectMatch(u) {
+  if (!u?.id) return;
+  selectedUserId.value = u.id;
+  searchName.value = u.full_name || "";
+  runSearch(u.id);
 }
 
 async function loadConnections() {
@@ -157,6 +343,7 @@ async function loadGraph() {
   try {
     const data = await api.graphAll();
     renderGraph(data);
+    if (searchResult.value?.path?.length) applyHighlight(searchResult.value.path);
   } catch (e) {
     graphError.value = e?.message || "Failed to load graph";
   } finally {
@@ -237,17 +424,17 @@ onMounted(async () => {
         <div class="text-xs text-amber-800">Add your LinkedIn slug so others can connect to you.</div>
 
         <div>
-          <label class="block text-sm font-semibold text-gray-800" for="my_linkedin_slug">LinkedIn slug</label>
+          <label class="block text-sm font-semibold text-gray-800" for="my_linkedin_slug">LinkedIn link</label>
           <input
             id="my_linkedin_slug"
             class="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-100"
             v-model="mySlug"
-            placeholder="e.g. janedoe"
+            placeholder="e.g. linkedin.com/in/janedoe"
             autocomplete="off"
             inputmode="text"
             required
           />
-          <div class="mt-1 text-xs text-gray-600">This is the part after linkedin.com/in/</div>
+          
         </div>
 
         <button
@@ -265,17 +452,16 @@ onMounted(async () => {
 
       <form class="mt-4 space-y-3" @submit.prevent="handleAddConnection" aria-label="Add connection form">
         <div>
-          <label class="block text-sm font-semibold text-gray-800" for="linkedin_slug">LinkedIn slug</label>
+          <label class="block text-sm font-semibold text-gray-800" for="linkedin_slug">LinkedIn link</label>
           <input
             id="linkedin_slug"
             class="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-100"
             v-model="addSlug"
-            placeholder="e.g. janedoe"
+            placeholder="e.g. linkedin.com/in/janedoe"
             autocomplete="off"
             inputmode="text"
             required
           />
-          <div class="mt-1 text-xs text-gray-500">This is the part after linkedin.com/in/</div>
         </div>
 
         <div>
@@ -312,7 +498,18 @@ onMounted(async () => {
       <ul v-else class="mt-2 space-y-2" aria-label="Connections list">
         <li v-for="c in connections" :key="c.id" class="rounded-xl border border-gray-200 bg-white px-3 py-2">
           <div class="text-sm font-semibold text-gray-900">{{ c.full_name }}</div>
-          <div class="text-xs text-gray-500">{{ c.linkedin_slug }}</div>
+          <div class="text-xs text-gray-500">
+            <a
+              v-if="c.linkedin_slug"
+              class="text-blue-700 hover:underline"
+              :href="linkedinUrl(c.linkedin_slug)"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              {{ c.linkedin_slug }}
+            </a>
+            <span v-else>—</span>
+          </div>
         </li>
       </ul>
 
@@ -326,7 +523,18 @@ onMounted(async () => {
       <ul v-else class="mt-2 space-y-2" aria-label="Users list">
         <li v-for="u in users" :key="u.id" class="rounded-xl border border-gray-200 bg-white px-3 py-2">
           <div class="text-sm font-semibold text-gray-900">{{ u.full_name }}</div>
-          <div class="text-xs text-gray-500">{{ u.linkedin_slug }}</div>
+          <div class="text-xs text-gray-500">
+            <a
+              v-if="u.linkedin_slug"
+              class="text-blue-700 hover:underline"
+              :href="linkedinUrl(u.linkedin_slug)"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              {{ u.linkedin_slug }}
+            </a>
+            <span v-else>—</span>
+          </div>
         </li>
       </ul>
     </section>
@@ -336,6 +544,55 @@ onMounted(async () => {
         <h2 class="text-lg font-bold">Network graph</h2>
         <div class="text-sm text-gray-600" v-if="graphLoading">Loading…</div>
       </div>
+
+      <div class="mb-3 rounded-xl border border-gray-200 bg-white p-3" aria-label="Search panel">
+        <div class="text-sm font-semibold text-gray-900">Find connection path</div>
+        <div class="mt-2 flex gap-2">
+          <input
+            class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-100"
+            v-model="searchName"
+            placeholder="Search a name…"
+            autocomplete="off"
+          />
+          <button
+            class="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+            type="button"
+            @click="clearHighlight"
+            :disabled="searchLoading"
+          >
+            Clear
+          </button>
+        </div>
+
+        <div v-if="searchMatches.length" class="mt-2 rounded-lg border border-gray-200 bg-white">
+          <button
+            v-for="u in searchMatches"
+            :key="u.id"
+            type="button"
+            class="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-gray-50"
+            @click="selectMatch(u)"
+          >
+            <span class="font-medium text-gray-900">{{ u.full_name }}</span>
+            <span class="text-xs text-gray-500">{{ u.linkedin_slug || "(no slug)" }}</span>
+          </button>
+        </div>
+
+        <p v-if="searchLoading" class="mt-2 text-sm text-gray-600">Searching…</p>
+        <p v-else-if="searchError" class="mt-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800" role="alert">{{ searchError }}</p>
+
+        <p v-else-if="searchResult && searchResult.degrees === null" class="mt-2 text-sm text-gray-600">No connection path found.</p>
+        <p v-else-if="searchResult && typeof searchResult.degrees === 'number'" class="mt-2 text-sm text-gray-700">
+          Degrees: <strong>{{ searchResult.degrees }}</strong>
+        </p>
+
+        <div v-if="searchResult?.path?.length" class="mt-2 text-xs text-gray-600">
+          <span v-for="(p, idx) in searchResult.path" :key="p.id">
+            <span class="font-semibold">{{ p.full_name }}</span>
+            <span v-if="idx < searchResult.path.length - 1"> → </span>
+          </span>
+        </div>
+      </div>
+
       <p v-if="status" class="mb-2 text-sm text-gray-600">{{ status }}</p>
       <p v-if="graphError" class="mb-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800" role="alert">{{ graphError }}</p>
       <div ref="host" class="min-h-150 w-full overflow-hidden rounded-2xl border border-gray-200 bg-white" aria-label="Graph visualization"></div>

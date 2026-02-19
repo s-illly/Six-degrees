@@ -44,6 +44,7 @@ export const api = {
     claimMySlug: (linkedin_slug) => request("/me/slug", { method: "POST", body: { linkedin_slug } }),
     graph: () => request("/graph"),
     graphAll: () => request("/graph/all"),
+    searchPathByUserId: (user_id) => request(`/search/id?user_id=${encodeURIComponent(user_id)}`),
     usersList: () => request("/users"),
     connectionsList: () => request("/connections"),
     addConnection: ({ linkedin_slug, full_name = "" }) =>
