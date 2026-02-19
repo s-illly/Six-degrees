@@ -8,6 +8,7 @@ from schemas import ConnectionsRequest, ClaimSlugRequest
 from sqlalchemy import or_
 from collections import defaultdict, deque 
 from fastapi.middleware.cors import CORSMiddleware
+import os
 from linkedin_utils import (
     canonicalize_ghost_profiles_for_slug,
     find_user_for_slug,
@@ -22,7 +23,11 @@ Base.metadata.create_all(bind=engine)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=[
+        o.strip()
+        for o in os.getenv("CORS_ALLOW_ORIGINS", "http://localhost:5173").split(",")
+        if o.strip()
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
